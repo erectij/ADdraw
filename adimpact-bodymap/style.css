@@ -107,6 +107,7 @@ html, body {
   overflow: hidden;
   background: var(--col-bg);
   cursor: crosshair;
+  touch-action: none;
 }
 
 .canvas-bg,

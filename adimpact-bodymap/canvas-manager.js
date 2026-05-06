@@ -4,14 +4,13 @@
  *   bgCanvas   — silhouette + region boundaries, never erased
  *   drawCanvas — user strokes only, transparent background (safe to erase)
  *
- * Input routing:
- *   Finger touch  → Touch Events API  (reliable multi-touch on iOS/iPadOS Safari)
- *   Mouse / Pen   → Pointer Events API
+ * Touch events are registered on the canvas-WRAPPER div (not the canvas
+ * element itself) via CanvasManager.bindWrapper() — Safari reliably delivers
+ * multi-touch events to a regular div but can be inconsistent on <canvas>.
  *
- * Touch gestures:
+ * Gestures:
  *   1 finger  → draw stroke
- *   2 fingers → pinch-to-zoom + two-finger pan (combined)
- *   After pinch ends → IDLE (lifting one finger doesn't restart drawing)
+ *   2 fingers → pinch-to-zoom + two-finger pan
  */
 
 const GESTURE  = { IDLE: 'idle', DRAWING: 'drawing', ZOOMING: 'zooming' };
@@ -43,30 +42,13 @@ class CanvasView {
     this.undoStack = [];
     this.redoStack = [];
 
-    // Gesture state
+    // Gesture state — driven by CanvasManager.bindWrapper() touch listeners
     this.gestureState   = GESTURE.IDLE;
     this._currentStroke = null;
     this._pinchRef      = null;
     this._activeTouchId = null;
 
-    this._bindEvents();
-  }
-
-  _bindEvents() {
-    // Touch Events handle ALL finger input — more reliable than Pointer Events
-    // for multi-touch on iOS/iPadOS Safari.
-    this._onTouchStart  = this._onTouchStart.bind(this);
-    this._onTouchMove   = this._onTouchMove.bind(this);
-    this._onTouchEnd    = this._onTouchEnd.bind(this);
-    this._onTouchCancel = this._onTouchCancel.bind(this);
-    const noPassive = { passive: false };
-    this.canvas.addEventListener('touchstart',  this._onTouchStart,  noPassive);
-    this.canvas.addEventListener('touchmove',   this._onTouchMove,   noPassive);
-    this.canvas.addEventListener('touchend',    this._onTouchEnd,    noPassive);
-    this.canvas.addEventListener('touchcancel', this._onTouchCancel, noPassive);
-
-    // Pointer Events handle mouse and pen (Apple Pencil) only.
-    // Touch-sourced pointer events are filtered out at the top of each handler.
+    // Mouse-only pointer events on the draw canvas
     this._onPtrDown   = this._onPtrDown.bind(this);
     this._onPtrMove   = this._onPtrMove.bind(this);
     this._onPtrUp     = this._onPtrUp.bind(this);
@@ -78,10 +60,6 @@ class CanvasView {
   }
 
   destroy() {
-    this.canvas.removeEventListener('touchstart',  this._onTouchStart);
-    this.canvas.removeEventListener('touchmove',   this._onTouchMove);
-    this.canvas.removeEventListener('touchend',    this._onTouchEnd);
-    this.canvas.removeEventListener('touchcancel', this._onTouchCancel);
     this.canvas.removeEventListener('pointerdown',   this._onPtrDown);
     this.canvas.removeEventListener('pointermove',   this._onPtrMove);
     this.canvas.removeEventListener('pointerup',     this._onPtrUp);
@@ -196,37 +174,33 @@ class CanvasView {
 
   _canvasToSvg(cx, cy) {
     const dpr = this.dpr;
-    const px  = cx * dpr;
-    const py  = cy * dpr;
-    const ux  = (px - this.panX * dpr) / this.scale;
-    const uy  = (py - this.panY * dpr) / this.scale;
+    const ux  = (cx * dpr - this.panX * dpr) / this.scale;
+    const uy  = (cy * dpr - this.panY * dpr) / this.scale;
     return { x: (ux - this.offsetX) / this.baseScale,
              y: (uy - this.offsetY) / this.baseScale };
   }
 
   _getPointerXY(e) {
-    const rect = this.canvas.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const r = this.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
   _getTouchPos(touch) {
-    const rect = this.canvas.getBoundingClientRect();
-    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+    const r = this.canvas.getBoundingClientRect();
+    return { x: touch.clientX - r.left, y: touch.clientY - r.top };
   }
 
-  // ── Touch Events — finger input ───────────────────────────────
+  // ── Touch handlers — called from CanvasManager.bindWrapper() ──
+  // (not registered on the canvas; wrapper div is the listener target)
 
-  _onTouchStart(e) {
-    e.preventDefault();
-
+  handleTouchStart(e) {
     if (e.touches.length === 1) {
       if (this.gestureState !== GESTURE.IDLE) return;
       this._activeTouchId = e.touches[0].identifier;
       this.gestureState   = GESTURE.DRAWING;
       this._startStroke(this._getTouchPos(e.touches[0]));
 
-    } else if (e.touches.length === 2) {
-      // Second finger: cancel any in-progress stroke and start pinch
+    } else if (e.touches.length >= 2) {
       if (this.gestureState === GESTURE.DRAWING) {
         this._currentStroke = null;
         this.redraw();
@@ -237,16 +211,14 @@ class CanvasView {
     }
   }
 
-  _onTouchMove(e) {
-    e.preventDefault();
-
+  handleTouchMove(e) {
     if (this.gestureState === GESTURE.DRAWING && e.touches.length === 1) {
-      const touch = Array.from(e.touches).find(t => t.identifier === this._activeTouchId);
-      if (touch) this._continueStroke(this._getTouchPos(touch));
+      const t = Array.from(e.touches).find(t => t.identifier === this._activeTouchId);
+      if (t) this._continueStroke(this._getTouchPos(t));
 
-    } else if (e.touches.length === 2) {
-      // Second finger arrived mid-move (handles very fast second-finger placement)
+    } else if (e.touches.length >= 2) {
       if (this.gestureState === GESTURE.DRAWING) {
+        // Second finger arrived mid-stroke — cancel stroke and switch to pinch
         this._currentStroke = null;
         this.redraw();
         this._activeTouchId = null;
@@ -258,25 +230,21 @@ class CanvasView {
     }
   }
 
-  _onTouchEnd(e) {
-    e.preventDefault();
-
+  handleTouchEnd(e) {
     if (this.gestureState === GESTURE.DRAWING && e.touches.length === 0) {
       this._commitStroke();
       this.gestureState   = GESTURE.IDLE;
       this._activeTouchId = null;
 
     } else if (this.gestureState === GESTURE.ZOOMING && e.touches.length < 2) {
-      // Don't allow the remaining finger to immediately start drawing —
-      // lifting one pinch finger must not leave a mark.
+      // Don't auto-restart drawing when one pinch finger lifts
       this._pinchRef      = null;
       this.gestureState   = GESTURE.IDLE;
       this._activeTouchId = null;
     }
   }
 
-  _onTouchCancel(e) {
-    e.preventDefault();
+  handleTouchCancel(e) {
     if (this.gestureState === GESTURE.DRAWING) {
       this._currentStroke = null;
       this.redraw();
@@ -286,10 +254,20 @@ class CanvasView {
     this._activeTouchId = null;
   }
 
-  // ── Pointer Events — mouse / Apple Pencil ─────────────────────
+  cancelGesture() {
+    if (this.gestureState === GESTURE.DRAWING) {
+      this._currentStroke = null;
+      this.redraw();
+    }
+    this.gestureState   = GESTURE.IDLE;
+    this._pinchRef      = null;
+    this._activeTouchId = null;
+  }
+
+  // ── Mouse pointer events (non-touch) ─────────────────────────
 
   _onPtrDown(e) {
-    if (e.pointerType === 'touch') return; // handled by Touch Events
+    if (e.pointerType === 'touch') return;
     e.preventDefault();
     this.canvas.setPointerCapture(e.pointerId);
     if (this.gestureState !== GESTURE.IDLE) return;
@@ -343,7 +321,6 @@ class CanvasView {
     const { startScale, startPanX, startPanY, midX: rMX, midY: rMY, dist: rD } = this._pinchRef;
     const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, startScale * (dist / rD)));
     const sf       = newScale / startScale;
-    // Pan from scale change + midpoint drift
     const newPanX  = rMX - sf * (rMX - startPanX) + (midX - rMX);
     const newPanY  = rMY - sf * (rMY - startPanY) + (midY - rMY);
 
@@ -526,6 +503,31 @@ class CanvasManager {
     this.views[viewName] = new CanvasView(bgCanvas, drawCanvas, silDef, viewName);
   }
 
+  /**
+   * Attach touch gesture listeners to the canvas-wrapper div.
+   * Must be called once after views are registered.
+   * A div is used instead of the <canvas> element because Safari reliably
+   * delivers multi-touch events to divs but can miss touchstart on canvases.
+   */
+  bindWrapper(wrapper) {
+    const opts = { passive: false };
+    wrapper.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      this.getActiveView()?.handleTouchStart(e);
+    }, opts);
+    wrapper.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      this.getActiveView()?.handleTouchMove(e);
+    }, opts);
+    wrapper.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      this.getActiveView()?.handleTouchEnd(e);
+    }, opts);
+    wrapper.addEventListener('touchcancel', (e) => {
+      this.getActiveView()?.handleTouchCancel(e);
+    }, opts);
+  }
+
   layoutAll(cssWidth, cssHeight, dpr) {
     for (const [, view] of Object.entries(this.views)) {
       for (const canvas of [view.bgCanvas, view.canvas]) {
@@ -538,7 +540,13 @@ class CanvasManager {
     }
   }
 
-  setActiveView(v) { if (this.views[v]) this.activeView = v; }
+  setActiveView(v) {
+    if (this.views[v]) {
+      this.getActiveView()?.cancelGesture();
+      this.activeView = v;
+    }
+  }
+
   getActiveView()  { return this.views[this.activeView]; }
   getView(name)    { return this.views[name]; }
 

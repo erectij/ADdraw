@@ -106,6 +106,7 @@ class App {
     }
 
     this.canvasManager.layoutAll(cssW, cssH, dpr);
+    this.canvasManager.bindWrapper(wrapper);
     this.exporter = new Exporter(this.canvasManager, this.regionMap);
   }
 
