@@ -4,85 +4,105 @@
  *   bgCanvas   — silhouette + region boundaries, never erased
  *   drawCanvas — user strokes only, transparent background (safe to erase)
  *
- * Gesture state machine:
- *   IDLE → 1st pointer (80ms buffer) → DRAWING
- *   IDLE → 2nd pointer within buffer  → ZOOMING
- *   DRAWING → 2nd pointer down         → cancel stroke, ZOOMING
- *   ZOOMING → all pointers lifted       → IDLE
- *   DRAWING → pointer lifted            → commit stroke, IDLE
+ * Input routing:
+ *   Finger touch  → Touch Events API  (reliable multi-touch on iOS/iPadOS Safari)
+ *   Mouse / Pen   → Pointer Events API
+ *
+ * Touch gestures:
+ *   1 finger  → draw stroke
+ *   2 fingers → pinch-to-zoom + two-finger pan (combined)
+ *   After pinch ends → IDLE (lifting one finger doesn't restart drawing)
  */
 
-const GESTURE = { IDLE: 'idle', DRAWING: 'drawing', ZOOMING: 'zooming' };
-const DRAW_BUFFER_MS = 80;
-const MAX_UNDO = 50;
+const GESTURE  = { IDLE: 'idle', DRAWING: 'drawing', ZOOMING: 'zooming' };
+const MAX_UNDO  = 50;
+const MIN_SCALE = 1;
+const MAX_SCALE = 8;
 
 class CanvasView {
   constructor(bgCanvas, drawCanvas, silDef, viewName) {
-    this.bgCanvas   = bgCanvas;
-    this.canvas     = drawCanvas;   // pointer events + stroke rendering
-    this.bgCtx      = bgCanvas.getContext('2d');
-    this.ctx        = drawCanvas.getContext('2d');
-    this.silDef     = silDef;
-    this.viewName   = viewName;
+    this.bgCanvas  = bgCanvas;
+    this.canvas    = drawCanvas;
+    this.bgCtx     = bgCanvas.getContext('2d');
+    this.ctx       = drawCanvas.getContext('2d');
+    this.silDef    = silDef;
+    this.viewName  = viewName;
 
-    // Transform state (shared — both canvases use same transform)
-    this.scale      = 1;
-    this.panX       = 0;
-    this.panY       = 0;
-    this.baseScale  = 1;
-    this.offsetX    = 0;
-    this.offsetY    = 0;
-    this.dpr        = 1;
-    this.cssWidth   = 0;
-    this.cssHeight  = 0;
+    // Transform state
+    this.scale     = 1;
+    this.panX      = 0;
+    this.panY      = 0;
+    this.baseScale = 1;
+    this.offsetX   = 0;
+    this.offsetY   = 0;
+    this.dpr       = 1;
+    this.cssWidth  = 0;
+    this.cssHeight = 0;
 
     // Stroke history
-    this.undoStack  = [];
-    this.redoStack  = [];
+    this.undoStack = [];
+    this.redoStack = [];
 
-    // Gesture
+    // Gesture state
     this.gestureState   = GESTURE.IDLE;
-    this.activePointers = new Map();
-    this._bufferTimer   = null;
-    this._pendingStroke = null;
     this._currentStroke = null;
     this._pinchRef      = null;
+    this._activeTouchId = null;
 
-    this._onPointerDown   = this._onPointerDown.bind(this);
-    this._onPointerMove   = this._onPointerMove.bind(this);
-    this._onPointerUp     = this._onPointerUp.bind(this);
-    this._onPointerCancel = this._onPointerCancel.bind(this);
+    this._bindEvents();
+  }
 
-    // Pointer events go on the draw canvas (top layer)
-    this.canvas.addEventListener('pointerdown',   this._onPointerDown);
-    this.canvas.addEventListener('pointermove',   this._onPointerMove);
-    this.canvas.addEventListener('pointerup',     this._onPointerUp);
-    this.canvas.addEventListener('pointercancel', this._onPointerCancel);
-    this.canvas.style.touchAction = 'none';
+  _bindEvents() {
+    // Touch Events handle ALL finger input — more reliable than Pointer Events
+    // for multi-touch on iOS/iPadOS Safari.
+    this._onTouchStart  = this._onTouchStart.bind(this);
+    this._onTouchMove   = this._onTouchMove.bind(this);
+    this._onTouchEnd    = this._onTouchEnd.bind(this);
+    this._onTouchCancel = this._onTouchCancel.bind(this);
+    const noPassive = { passive: false };
+    this.canvas.addEventListener('touchstart',  this._onTouchStart,  noPassive);
+    this.canvas.addEventListener('touchmove',   this._onTouchMove,   noPassive);
+    this.canvas.addEventListener('touchend',    this._onTouchEnd,    noPassive);
+    this.canvas.addEventListener('touchcancel', this._onTouchCancel, noPassive);
+
+    // Pointer Events handle mouse and pen (Apple Pencil) only.
+    // Touch-sourced pointer events are filtered out at the top of each handler.
+    this._onPtrDown   = this._onPtrDown.bind(this);
+    this._onPtrMove   = this._onPtrMove.bind(this);
+    this._onPtrUp     = this._onPtrUp.bind(this);
+    this._onPtrCancel = this._onPtrCancel.bind(this);
+    this.canvas.addEventListener('pointerdown',   this._onPtrDown);
+    this.canvas.addEventListener('pointermove',   this._onPtrMove);
+    this.canvas.addEventListener('pointerup',     this._onPtrUp);
+    this.canvas.addEventListener('pointercancel', this._onPtrCancel);
   }
 
   destroy() {
-    this.canvas.removeEventListener('pointerdown',   this._onPointerDown);
-    this.canvas.removeEventListener('pointermove',   this._onPointerMove);
-    this.canvas.removeEventListener('pointerup',     this._onPointerUp);
-    this.canvas.removeEventListener('pointercancel', this._onPointerCancel);
+    this.canvas.removeEventListener('touchstart',  this._onTouchStart);
+    this.canvas.removeEventListener('touchmove',   this._onTouchMove);
+    this.canvas.removeEventListener('touchend',    this._onTouchEnd);
+    this.canvas.removeEventListener('touchcancel', this._onTouchCancel);
+    this.canvas.removeEventListener('pointerdown',   this._onPtrDown);
+    this.canvas.removeEventListener('pointermove',   this._onPtrMove);
+    this.canvas.removeEventListener('pointerup',     this._onPtrUp);
+    this.canvas.removeEventListener('pointercancel', this._onPtrCancel);
   }
 
-  // ─── Layout ──────────────────────────────────────────────────
+  // ── Layout ────────────────────────────────────────────────────
 
   layout(cssWidth, cssHeight, dpr) {
     const [,, svgW, svgH] = this.silDef.viewBox.split(' ').map(Number);
-    const scaleX = (cssWidth  * dpr) / svgW;
-    const scaleY = (cssHeight * dpr) / svgH;
-    this.baseScale  = Math.min(scaleX, scaleY) * 0.85;
-    this.offsetX    = ((cssWidth  * dpr) - svgW * this.baseScale) / 2;
-    this.offsetY    = ((cssHeight * dpr) - svgH * this.baseScale) / 2;
-    this.dpr        = dpr;
-    this.cssWidth   = cssWidth;
-    this.cssHeight  = cssHeight;
-    this.scale      = 1;
-    this.panX       = 0;
-    this.panY       = 0;
+    const scaleX   = (cssWidth  * dpr) / svgW;
+    const scaleY   = (cssHeight * dpr) / svgH;
+    this.baseScale = Math.min(scaleX, scaleY) * 0.85;
+    this.offsetX   = ((cssWidth  * dpr) - svgW * this.baseScale) / 2;
+    this.offsetY   = ((cssHeight * dpr) - svgH * this.baseScale) / 2;
+    this.dpr       = dpr;
+    this.cssWidth  = cssWidth;
+    this.cssHeight = cssHeight;
+    this.scale     = 1;
+    this.panX      = 0;
+    this.panY      = 0;
   }
 
   getDimensions() {
@@ -91,21 +111,19 @@ class CanvasView {
              scale: this.baseScale, offsetX: this.offsetX, offsetY: this.offsetY, svgW, svgH };
   }
 
-  // ─── Background (silhouette) ─────────────────────────────────
+  // ── Background (silhouette) ───────────────────────────────────
 
   redrawBg() {
     const ctx = this.bgCtx;
     const w   = this.bgCanvas.width;
     const h   = this.bgCanvas.height;
     ctx.clearRect(0, 0, w, h);
-
     ctx.save();
     ctx.translate(this.panX * this.dpr, this.panY * this.dpr);
     ctx.scale(this.scale, this.scale);
     ctx.translate(this.offsetX, this.offsetY);
     ctx.scale(this.baseScale, this.baseScale);
 
-    // Body fill + outline
     ctx.fillStyle   = '#E0E0E0';
     ctx.strokeStyle = '#999999';
     ctx.lineWidth   = 1.5 / this.baseScale;
@@ -113,41 +131,33 @@ class CanvasView {
     ctx.fill(outline);
     ctx.stroke(outline);
 
-    // Facial details (head & neck view)
     if (this.silDef.details) {
       ctx.strokeStyle = '#BBBBBB';
       ctx.lineWidth   = 1 / this.baseScale;
       ctx.stroke(new Path2D(this.silDef.details));
     }
 
-    // Dashed region boundaries
     if (this.silDef.regionBoundaries?.length) {
       ctx.strokeStyle = '#AAAAAA';
       ctx.lineWidth   = 1 / this.baseScale;
       ctx.setLineDash([4 / this.baseScale, 4 / this.baseScale]);
-      for (const b of this.silDef.regionBoundaries) {
-        ctx.stroke(new Path2D(b.d));
-      }
+      for (const b of this.silDef.regionBoundaries) ctx.stroke(new Path2D(b.d));
       ctx.setLineDash([]);
     }
-
     ctx.restore();
   }
 
-  // ─── Stroke layer ────────────────────────────────────────────
+  // ── Stroke layer ──────────────────────────────────────────────
 
   redraw() {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    // Apply zoom+pan then draw all committed strokes
     ctx.save();
     ctx.translate(this.panX * this.dpr, this.panY * this.dpr);
     ctx.scale(this.scale, this.scale);
     ctx.translate(this.offsetX, this.offsetY);
     ctx.scale(this.baseScale, this.baseScale);
-    for (const stroke of this.undoStack) {
-      this._renderStroke(ctx, stroke);
-    }
+    for (const stroke of this.undoStack) this._renderStroke(ctx, stroke);
     ctx.restore();
   }
 
@@ -182,7 +192,7 @@ class CanvasView {
     ctx.restore();
   }
 
-  // ─── Coordinate mapping ──────────────────────────────────────
+  // ── Coordinate helpers ────────────────────────────────────────
 
   _canvasToSvg(cx, cy) {
     const dpr = this.dpr;
@@ -199,105 +209,165 @@ class CanvasView {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   }
 
-  // ─── Gesture state machine ───────────────────────────────────
+  _getTouchPos(touch) {
+    const rect = this.canvas.getBoundingClientRect();
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  }
 
-  _onPointerDown(e) {
+  // ── Touch Events — finger input ───────────────────────────────
+
+  _onTouchStart(e) {
     e.preventDefault();
-    // Do NOT call setPointerCapture here — on iPadOS/Safari, capturing the first
-    // pointer immediately prevents the second finger's pointerdown from firing,
-    // making pinch-to-zoom unreachable. Capture is deferred to gesture confirmation.
-    if (e.pointerType === 'touch' && e.width > 60 && e.height > 60) return;
 
-    const pos = this._getPointerXY(e);
-    this.activePointers.set(e.pointerId, pos);
+    if (e.touches.length === 1) {
+      if (this.gestureState !== GESTURE.IDLE) return;
+      this._activeTouchId = e.touches[0].identifier;
+      this.gestureState   = GESTURE.DRAWING;
+      this._startStroke(this._getTouchPos(e.touches[0]));
 
-    if (this.activePointers.size === 1) {
-      const pointerId = e.pointerId;
-      this._cancelBuffer();
-      this._pendingStroke = { pointerId, startPos: pos };
-      this._bufferTimer = setTimeout(() => {
-        if (this.gestureState === GESTURE.IDLE && this.activePointers.size === 1) {
-          // Single touch confirmed — safe to capture and begin drawing
-          try { this.canvas.setPointerCapture(pointerId); } catch (_) {}
-          this.gestureState = GESTURE.DRAWING;
-          this._startStroke(pos);
-        }
-        this._bufferTimer = null;
-        this._pendingStroke = null;
-      }, DRAW_BUFFER_MS);
-
-    } else if (this.activePointers.size === 2) {
-      this._cancelBuffer();
+    } else if (e.touches.length === 2) {
+      // Second finger: cancel any in-progress stroke and start pinch
       if (this.gestureState === GESTURE.DRAWING) {
         this._currentStroke = null;
         this.redraw();
       }
-      this.gestureState = GESTURE.ZOOMING;
-      // Capture both pointers so move/up events keep arriving during pinch
-      for (const [pid] of this.activePointers) {
-        try { this.canvas.setPointerCapture(pid); } catch (_) {}
-      }
-      this._initPinch();
+      this._activeTouchId = null;
+      this.gestureState   = GESTURE.ZOOMING;
+      this._initPinch(e.touches);
     }
   }
 
-  _onPointerMove(e) {
+  _onTouchMove(e) {
     e.preventDefault();
-    if (!this.activePointers.has(e.pointerId)) return;
-    const pos = this._getPointerXY(e);
-    this.activePointers.set(e.pointerId, pos);
 
-    if (this.gestureState === GESTURE.DRAWING) {
-      this._continueStroke(pos);
-    } else if (this.gestureState === GESTURE.ZOOMING && this.activePointers.size === 2) {
-      this._updatePinch();
-    }
-  }
+    if (this.gestureState === GESTURE.DRAWING && e.touches.length === 1) {
+      const touch = Array.from(e.touches).find(t => t.identifier === this._activeTouchId);
+      if (touch) this._continueStroke(this._getTouchPos(touch));
 
-  _onPointerUp(e) {
-    e.preventDefault();
-    this.activePointers.delete(e.pointerId);
-
-    if (this.gestureState === GESTURE.DRAWING) {
-      this._commitStroke();
-      this.gestureState = GESTURE.IDLE;
-    } else if (this.gestureState === GESTURE.ZOOMING) {
-      if (this.activePointers.size === 0) {
-        this.gestureState = GESTURE.IDLE;
-        this._pinchRef = null;
-      } else {
-        this._pinchRef = null;
+    } else if (e.touches.length === 2) {
+      // Second finger arrived mid-move (handles very fast second-finger placement)
+      if (this.gestureState === GESTURE.DRAWING) {
+        this._currentStroke = null;
+        this.redraw();
+        this._activeTouchId = null;
+        this.gestureState   = GESTURE.ZOOMING;
+        this._initPinch(e.touches);
+      } else if (this.gestureState === GESTURE.ZOOMING) {
+        this._updatePinch(e.touches);
       }
-    } else if (this._bufferTimer !== null) {
-      // Tap during buffer window
-      this._cancelBuffer();
-      const pos = this._getPointerXY(e);
-      this._startStroke(pos);
-      this._commitStroke();
     }
-
-    if (this.activePointers.size === 0) this._cancelBuffer();
   }
 
-  _onPointerCancel(e) {
-    this.activePointers.delete(e.pointerId);
-    if (this.activePointers.size === 0) {
-      this._cancelBuffer();
+  _onTouchEnd(e) {
+    e.preventDefault();
+
+    if (this.gestureState === GESTURE.DRAWING && e.touches.length === 0) {
+      this._commitStroke();
+      this.gestureState   = GESTURE.IDLE;
+      this._activeTouchId = null;
+
+    } else if (this.gestureState === GESTURE.ZOOMING && e.touches.length < 2) {
+      // Don't allow the remaining finger to immediately start drawing —
+      // lifting one pinch finger must not leave a mark.
+      this._pinchRef      = null;
+      this.gestureState   = GESTURE.IDLE;
+      this._activeTouchId = null;
+    }
+  }
+
+  _onTouchCancel(e) {
+    e.preventDefault();
+    if (this.gestureState === GESTURE.DRAWING) {
       this._currentStroke = null;
-      this.gestureState = GESTURE.IDLE;
       this.redraw();
     }
+    this.gestureState   = GESTURE.IDLE;
+    this._pinchRef      = null;
+    this._activeTouchId = null;
   }
 
-  _cancelBuffer() {
-    if (this._bufferTimer !== null) { clearTimeout(this._bufferTimer); this._bufferTimer = null; }
-    this._pendingStroke = null;
+  // ── Pointer Events — mouse / Apple Pencil ─────────────────────
+
+  _onPtrDown(e) {
+    if (e.pointerType === 'touch') return; // handled by Touch Events
+    e.preventDefault();
+    this.canvas.setPointerCapture(e.pointerId);
+    if (this.gestureState !== GESTURE.IDLE) return;
+    this.gestureState = GESTURE.DRAWING;
+    this._startStroke(this._getPointerXY(e));
   }
 
-  // ─── Stroke operations ───────────────────────────────────────
+  _onPtrMove(e) {
+    if (e.pointerType === 'touch') return;
+    if (this.gestureState !== GESTURE.DRAWING) return;
+    this._continueStroke(this._getPointerXY(e));
+  }
+
+  _onPtrUp(e) {
+    if (e.pointerType === 'touch') return;
+    if (this.gestureState === GESTURE.DRAWING) {
+      this._commitStroke();
+      this.gestureState = GESTURE.IDLE;
+    }
+  }
+
+  _onPtrCancel(e) {
+    if (e.pointerType === 'touch') return;
+    if (this.gestureState === GESTURE.DRAWING) {
+      this._currentStroke = null;
+      this.redraw();
+      this.gestureState = GESTURE.IDLE;
+    }
+  }
+
+  // ── Pinch + two-finger pan ────────────────────────────────────
+
+  _initPinch(touches) {
+    const a = this._getTouchPos(touches[0]);
+    const b = this._getTouchPos(touches[1]);
+    this._pinchRef = {
+      midX: (a.x + b.x) / 2,  midY: (a.y + b.y) / 2,
+      dist: Math.hypot(b.x - a.x, b.y - a.y),
+      startScale: this.scale, startPanX: this.panX, startPanY: this.panY,
+    };
+  }
+
+  _updatePinch(touches) {
+    if (!this._pinchRef) { this._initPinch(touches); return; }
+    const a    = this._getTouchPos(touches[0]);
+    const b    = this._getTouchPos(touches[1]);
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+
+    const { startScale, startPanX, startPanY, midX: rMX, midY: rMY, dist: rD } = this._pinchRef;
+    const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, startScale * (dist / rD)));
+    const sf       = newScale / startScale;
+    // Pan from scale change + midpoint drift
+    const newPanX  = rMX - sf * (rMX - startPanX) + (midX - rMX);
+    const newPanY  = rMY - sf * (rMY - startPanY) + (midY - rMY);
+
+    this.scale = newScale;
+    this.panX  = this._clampPan('x', newPanX);
+    this.panY  = this._clampPan('y', newPanY);
+    requestAnimationFrame(() => { this.redrawBg(); this.redraw(); });
+  }
+
+  _clampPan(axis, val) {
+    const pad = 50;
+    if (axis === 'x') return Math.min(pad, Math.max(this.cssWidth  - this.cssWidth  * this.scale - pad, val));
+    else              return Math.min(pad, Math.max(this.cssHeight - this.cssHeight * this.scale - pad, val));
+  }
+
+  resetZoom() {
+    this.scale = 1; this.panX = 0; this.panY = 0;
+    this.redrawBg(); this.redraw();
+  }
+
+  // ── Stroke operations ─────────────────────────────────────────
 
   _startStroke(cssPos) {
-    const svgPos = this._canvasToSvg(cssPos.x, cssPos.y);
+    const svgPos   = this._canvasToSvg(cssPos.x, cssPos.y);
     const brushSvg = (window.appState?.brushSize ?? 20) / this.baseScale;
     this._currentStroke = {
       points:    [{ x: svgPos.x, y: svgPos.y, t: Date.now() }],
@@ -313,7 +383,6 @@ class CanvasView {
     requestAnimationFrame(() => {
       if (!this._currentStroke) return;
       this.redraw();
-      // Draw current stroke on top
       this.ctx.save();
       this.ctx.translate(this.panX * this.dpr, this.panY * this.dpr);
       this.ctx.scale(this.scale, this.scale);
@@ -336,7 +405,7 @@ class CanvasView {
     this.redraw();
   }
 
-  // ─── Undo / Redo ─────────────────────────────────────────────
+  // ── Undo / Redo ───────────────────────────────────────────────
 
   undo() {
     if (this.undoStack.length === 0) return false;
@@ -364,60 +433,8 @@ class CanvasView {
 
   hasStrokes() { return this.undoStack.length > 0; }
 
-  // ─── Zoom / Pan ───────────────────────────────────────────────
+  // ── Export helpers ────────────────────────────────────────────
 
-  _initPinch() {
-    const pts = [...this.activePointers.values()];
-    if (pts.length < 2) return;
-    const [a, b] = pts;
-    this._pinchRef = {
-      midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2,
-      dist: Math.hypot(b.x - a.x, b.y - a.y),
-      startScale: this.scale, startPanX: this.panX, startPanY: this.panY,
-    };
-  }
-
-  _updatePinch() {
-    if (!this._pinchRef) { this._initPinch(); return; }
-    const pts = [...this.activePointers.values()];
-    if (pts.length < 2) return;
-    const [a, b] = pts;
-    const midX = (a.x + b.x) / 2;
-    const midY = (a.y + b.y) / 2;
-    const dist = Math.hypot(b.x - a.x, b.y - a.y);
-
-    const { startScale, startPanX, startPanY, midX: rMX, midY: rMY, dist: rD } = this._pinchRef;
-    const newScale = Math.min(8, Math.max(1, startScale * (dist / rD)));
-    const sf       = newScale / startScale;
-    const newPanX  = rMX - sf * (rMX - startPanX) + (midX - rMX);
-    const newPanY  = rMY - sf * (rMY - startPanY) + (midY - rMY);
-
-    this.scale = newScale;
-    this.panX  = this._clampPan('x', newPanX);
-    this.panY  = this._clampPan('y', newPanY);
-    requestAnimationFrame(() => { this.redrawBg(); this.redraw(); });
-  }
-
-  _clampPan(axis, val) {
-    const padding = 50;
-    if (axis === 'x') {
-      return Math.min(padding, Math.max(this.cssWidth - this.cssWidth * this.scale - padding, val));
-    } else {
-      return Math.min(padding, Math.max(this.cssHeight - this.cssHeight * this.scale - padding, val));
-    }
-  }
-
-  resetZoom() {
-    this.scale = 1; this.panX = 0; this.panY = 0;
-    this.redrawBg(); this.redraw();
-  }
-
-  // ─── Export helpers ───────────────────────────────────────────
-
-  /**
-   * Composite bg + draw strokes onto a clean offscreen canvas.
-   * No zoom/pan applied — produces the "canonical" view.
-   */
   getExportCanvas() {
     const [,, svgW, svgH] = this.silDef.viewBox.split(' ').map(Number);
     const expScale = 2;
@@ -429,25 +446,21 @@ class CanvasView {
     off.height = h;
     const ctx  = off.getContext('2d');
 
-    // Draw silhouette
     ctx.save();
     ctx.scale(expScale, expScale);
     ctx.translate(this.offsetX / this.baseScale, this.offsetY / this.baseScale);
     ctx.scale(this.baseScale, this.baseScale);
-
     ctx.fillStyle   = '#E0E0E0';
     ctx.strokeStyle = '#999999';
     ctx.lineWidth   = 1.5;
     const outline = new Path2D(this.silDef.outline);
     ctx.fill(outline);
     ctx.stroke(outline);
-
     if (this.silDef.details) {
       ctx.strokeStyle = '#BBBBBB';
       ctx.lineWidth   = 1;
       ctx.stroke(new Path2D(this.silDef.details));
     }
-
     if (this.silDef.regionBoundaries?.length) {
       ctx.strokeStyle = '#AAAAAA';
       ctx.lineWidth   = 1;
@@ -457,35 +470,25 @@ class CanvasView {
     }
     ctx.restore();
 
-    // Draw strokes on top
     ctx.save();
     ctx.scale(expScale, expScale);
     ctx.translate(this.offsetX / this.baseScale, this.offsetY / this.baseScale);
     ctx.scale(this.baseScale, this.baseScale);
-    for (const stroke of this.undoStack) {
-      this._renderStroke(ctx, stroke);
-    }
+    for (const stroke of this.undoStack) this._renderStroke(ctx, stroke);
     ctx.restore();
 
     return off;
   }
 
-  /**
-   * Strokes-only canvas (transparent bg) matching the region-map dimensions.
-   * Used for BSA pixel counting.
-   */
   getDrawOnlyCanvas() {
     const off = document.createElement('canvas');
     off.width  = this.canvas.width;
     off.height = this.canvas.height;
     const ctx  = off.getContext('2d');
-
     ctx.save();
     ctx.translate(this.offsetX, this.offsetY);
     ctx.scale(this.baseScale, this.baseScale);
-    for (const stroke of this.undoStack) {
-      this._renderStroke(ctx, stroke);
-    }
+    for (const stroke of this.undoStack) this._renderStroke(ctx, stroke);
     ctx.restore();
     return off;
   }
@@ -525,7 +528,6 @@ class CanvasManager {
 
   layoutAll(cssWidth, cssHeight, dpr) {
     for (const [, view] of Object.entries(this.views)) {
-      // Size both canvases identically
       for (const canvas of [view.bgCanvas, view.canvas]) {
         canvas.width        = Math.round(cssWidth  * dpr);
         canvas.height       = Math.round(cssHeight * dpr);
@@ -544,8 +546,8 @@ class CanvasManager {
     for (const view of Object.values(this.views)) { view.redrawBg(); view.redraw(); }
   }
 
-  undo() { return this.getActiveView()?.undo(); }
-  redo() { return this.getActiveView()?.redo(); }
+  undo()      { return this.getActiveView()?.undo(); }
+  redo()      { return this.getActiveView()?.redo(); }
   resetZoom() { this.getActiveView()?.resetZoom(); }
 
   clearAll(viewName) {

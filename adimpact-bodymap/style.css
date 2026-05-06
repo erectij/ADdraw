@@ -32,6 +32,8 @@ html, body {
   color: var(--col-text);
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+  /* Prevent Safari from doing viewport-level pinch zoom anywhere in the app */
+  touch-action: none;
 }
 
 /* ── Layout Shell ─────────────────────────────────────────────── */
@@ -140,6 +142,7 @@ html, body {
   gap: 10px;
   overflow-y: auto;
   box-shadow: -2px 0 8px rgba(0,0,0,0.06);
+  touch-action: pan-y; /* allow scrolling inside the score panel */
 }
 
 .score-panel-title {
