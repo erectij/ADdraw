@@ -203,17 +203,22 @@ class CanvasView {
 
   _onPointerDown(e) {
     e.preventDefault();
-    this.canvas.setPointerCapture(e.pointerId);
+    // Do NOT call setPointerCapture here — on iPadOS/Safari, capturing the first
+    // pointer immediately prevents the second finger's pointerdown from firing,
+    // making pinch-to-zoom unreachable. Capture is deferred to gesture confirmation.
     if (e.pointerType === 'touch' && e.width > 60 && e.height > 60) return;
 
     const pos = this._getPointerXY(e);
     this.activePointers.set(e.pointerId, pos);
 
     if (this.activePointers.size === 1) {
+      const pointerId = e.pointerId;
       this._cancelBuffer();
-      this._pendingStroke = { pointerId: e.pointerId, startPos: pos };
+      this._pendingStroke = { pointerId, startPos: pos };
       this._bufferTimer = setTimeout(() => {
         if (this.gestureState === GESTURE.IDLE && this.activePointers.size === 1) {
+          // Single touch confirmed — safe to capture and begin drawing
+          try { this.canvas.setPointerCapture(pointerId); } catch (_) {}
           this.gestureState = GESTURE.DRAWING;
           this._startStroke(pos);
         }
@@ -228,6 +233,10 @@ class CanvasView {
         this.redraw();
       }
       this.gestureState = GESTURE.ZOOMING;
+      // Capture both pointers so move/up events keep arriving during pinch
+      for (const [pid] of this.activePointers) {
+        try { this.canvas.setPointerCapture(pid); } catch (_) {}
+      }
       this._initPinch();
     }
   }
