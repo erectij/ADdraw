@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "adimpact",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "7723", "--directory", "/Users/antoniosarno/Documents/appdev/databricks/ADimpact_drawing/adimpact-bodymap"],
+      "port": 7723
+    }
+  ]
+}

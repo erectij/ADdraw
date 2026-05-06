@@ -107,13 +107,24 @@ html, body {
   cursor: crosshair;
 }
 
-.canvas-layer {
+.canvas-bg,
+.canvas-draw {
   position: absolute;
   top: 0; left: 0;
   display: none;
-  touch-action: none;
 }
-.canvas-layer[data-view="front"] {
+/* bg canvases are not interactive */
+.canvas-bg {
+  pointer-events: none;
+}
+/* draw canvases capture pointer events */
+.canvas-draw {
+  touch-action: none;
+  background: transparent;
+}
+/* Front view starts visible */
+.canvas-bg[data-view="front"],
+.canvas-draw[data-view="front"] {
   display: block;
 }
 

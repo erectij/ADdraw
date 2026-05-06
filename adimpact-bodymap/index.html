@@ -30,14 +30,24 @@
   <!-- ── Main Content ─────────────────────────────────────────── -->
   <div id="main-content">
 
-    <!-- Canvas Area -->
+    <!-- Canvas Area — each view has a bg layer (silhouette) + draw layer (strokes) -->
     <div id="canvas-wrapper" aria-label="Body drawing area">
-      <canvas id="canvas-front"    class="canvas-layer" data-view="front"
-              aria-label="Front body view canvas"    tabindex="0"></canvas>
-      <canvas id="canvas-back"     class="canvas-layer" data-view="back"
-              aria-label="Back body view canvas"     tabindex="0"></canvas>
-      <canvas id="canvas-headNeck" class="canvas-layer" data-view="headNeck"
-              aria-label="Head and neck detail canvas" tabindex="0"></canvas>
+
+      <!-- FRONT VIEW -->
+      <canvas id="canvas-bg-front"   class="canvas-bg"   data-view="front"    aria-hidden="true"></canvas>
+      <canvas id="canvas-draw-front" class="canvas-draw canvas-layer" data-view="front"
+              aria-label="Front body drawing canvas" tabindex="0"></canvas>
+
+      <!-- BACK VIEW -->
+      <canvas id="canvas-bg-back"    class="canvas-bg"   data-view="back"     aria-hidden="true"></canvas>
+      <canvas id="canvas-draw-back"  class="canvas-draw canvas-layer" data-view="back"
+              aria-label="Back body drawing canvas" tabindex="0" style="display:none"></canvas>
+
+      <!-- HEAD & NECK VIEW -->
+      <canvas id="canvas-bg-headNeck"   class="canvas-bg"   data-view="headNeck" aria-hidden="true"></canvas>
+      <canvas id="canvas-draw-headNeck" class="canvas-draw canvas-layer" data-view="headNeck"
+              aria-label="Head and neck drawing canvas" tabindex="0" style="display:none"></canvas>
+
     </div>
 
     <!-- Score Panel -->
@@ -167,15 +177,12 @@
 
     <div class="tool-sep"></div>
 
-    <div class="tool-group">
+    <div class="tool-group" style="margin-left: auto;">
       <!-- Score panel toggle (phone only) -->
       <button class="tb-btn" id="btn-score-toggle" style="display:none"
               aria-label="Toggle score panel">
         📊
       </button>
-    </div>
-
-    <div class="tool-group" style="margin-left: auto;">
       <button class="tb-btn accent" id="btn-export" aria-label="Export data">
         📥 Export
       </button>
