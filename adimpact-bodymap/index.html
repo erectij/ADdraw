@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ADimpact Body Mapping</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Tab Bar ──────────────────────────────────────────────── -->
+  <header id="tabbar" role="tablist">
+    <button class="tab-btn active" role="tab" aria-selected="true"
+            data-view="front" aria-label="Front view">
+      <i class="ico">🫁</i> Front
+    </button>
+    <button class="tab-btn" role="tab" aria-selected="false"
+            data-view="back" aria-label="Back view">
+      <i class="ico">🔄</i> Back
+    </button>
+    <button class="tab-btn" role="tab" aria-selected="false"
+            data-view="headNeck" aria-label="Head and Neck detail view">
+      <i class="ico">🔍</i> Head &amp; Neck
+    </button>
+    <span class="app-title">ADimpact v0.1</span>
+  </header>
+
+  <!-- ── Main Content ─────────────────────────────────────────── -->
+  <div id="main-content">
+
+    <!-- Canvas Area -->
+    <div id="canvas-wrapper" aria-label="Body drawing area">
+      <canvas id="canvas-front"    class="canvas-layer" data-view="front"
+              aria-label="Front body view canvas"    tabindex="0"></canvas>
+      <canvas id="canvas-back"     class="canvas-layer" data-view="back"
+              aria-label="Back body view canvas"     tabindex="0"></canvas>
+      <canvas id="canvas-headNeck" class="canvas-layer" data-view="headNeck"
+              aria-label="Head and neck detail canvas" tabindex="0"></canvas>
+    </div>
+
+    <!-- Score Panel -->
+    <aside id="score-panel" aria-label="BSA score panel">
+      <div class="score-panel-title">EASI Body Regions</div>
+
+      <div id="calc-spinner" class="hidden" aria-live="polite" aria-label="Calculating">
+        <div class="spinner-dot"></div>
+        <div class="spinner-dot"></div>
+        <div class="spinner-dot"></div>
+        <span>Calculating…</span>
+      </div>
+
+      <div class="score-region" id="score-head">
+        <div class="score-region-header">
+          <span class="score-region-label">
+            <span class="region-dot head"></span>
+            Head &amp; Neck
+          </span>
+          <span class="score-value">0.0%</span>
+        </div>
+        <div class="score-bar"><div class="score-bar-fill"></div></div>
+        <div class="score-weight">EASI weight: 10%</div>
+      </div>
+
+      <div class="score-region" id="score-trunk">
+        <div class="score-region-header">
+          <span class="score-region-label">
+            <span class="region-dot trunk"></span>
+            Trunk
+          </span>
+          <span class="score-value">0.0%</span>
+        </div>
+        <div class="score-bar"><div class="score-bar-fill"></div></div>
+        <div class="score-weight">EASI weight: 30%</div>
+      </div>
+
+      <div class="score-region" id="score-upper">
+        <div class="score-region-header">
+          <span class="score-region-label">
+            <span class="region-dot upperLimbs"></span>
+            Upper Limbs
+          </span>
+          <span class="score-value">0.0%</span>
+        </div>
+        <div class="score-bar"><div class="score-bar-fill"></div></div>
+        <div class="score-weight">EASI weight: 20%</div>
+      </div>
+
+      <div class="score-region" id="score-lower">
+        <div class="score-region-header">
+          <span class="score-region-label">
+            <span class="region-dot lowerLimbs"></span>
+            Lower Limbs
+          </span>
+          <span class="score-value">0.0%</span>
+        </div>
+        <div class="score-bar"><div class="score-bar-fill"></div></div>
+        <div class="score-weight">EASI weight: 40%</div>
+      </div>
+
+      <div class="score-divider"></div>
+
+      <div class="score-total-row">
+        <span class="score-total-label">Total BSA%</span>
+        <span id="score-total">0.0%</span>
+      </div>
+
+      <button class="recalc-btn" id="btn-recalculate"
+              aria-label="Recalculate BSA scores">
+        ⟳ Recalculate
+      </button>
+    </aside>
+
+  </div><!-- /main-content -->
+
+  <!-- ── Toolbar ──────────────────────────────────────────────── -->
+  <footer id="toolbar" role="toolbar" aria-label="Drawing tools">
+
+    <div class="tool-group">
+      <button class="tb-btn active" id="btn-draw" data-tool="draw"
+              aria-label="Draw mode" aria-pressed="true">
+        ✏️ Draw
+      </button>
+      <button class="tb-btn" id="btn-erase" data-tool="erase"
+              aria-label="Erase mode" aria-pressed="false">
+        🧹 Erase
+      </button>
+    </div>
+
+    <div class="tool-sep"></div>
+
+    <div class="tool-group brush-control" aria-label="Brush size control">
+      <span class="brush-label">Brush</span>
+      <input type="range" id="brush-slider"
+             aria-label="Brush size slider"
+             min="1" max="50" step="0.5" value="10">
+      <div id="brush-preview" aria-hidden="true"></div>
+    </div>
+
+    <div class="tool-sep"></div>
+
+    <div class="tool-group">
+      <button class="tb-btn" id="btn-undo" disabled aria-label="Undo last stroke">
+        ↩ Undo
+      </button>
+      <button class="tb-btn" id="btn-redo" disabled aria-label="Redo stroke">
+        ↪ Redo
+      </button>
+    </div>
+
+    <div class="tool-sep"></div>
+
+    <div class="tool-group">
+      <button class="tb-btn" id="btn-reset-zoom" aria-label="Reset zoom to fit">
+        🔲 Reset Zoom
+      </button>
+    </div>
+
+    <div class="tool-sep"></div>
+
+    <div class="tool-group">
+      <button class="tb-btn danger" id="btn-clear" aria-label="Clear all drawings">
+        🗑 Clear All
+      </button>
+    </div>
+
+    <div class="tool-sep"></div>
+
+    <div class="tool-group">
+      <!-- Score panel toggle (phone only) -->
+      <button class="tb-btn" id="btn-score-toggle" style="display:none"
+              aria-label="Toggle score panel">
+        📊
+      </button>
+    </div>
+
+    <div class="tool-group" style="margin-left: auto;">
+      <button class="tb-btn accent" id="btn-export" aria-label="Export data">
+        📥 Export
+      </button>
+    </div>
+
+  </footer>
+
+  <!-- ── Export Modal ─────────────────────────────────────────── -->
+  <div id="export-modal" class="hidden" role="dialog" aria-modal="true"
+       aria-label="Export options">
+    <div class="modal-backdrop"></div>
+    <div class="modal-box">
+      <h2 class="modal-title">Export Data</h2>
+      <button class="modal-close" id="modal-close" aria-label="Close export modal">✕</button>
+
+      <div class="export-options">
+
+        <button class="export-btn" id="export-png" aria-label="Export PNG images">
+          <span class="export-icon">🖼</span>
+          <span>
+            Export PNG Images
+            <span class="export-desc">Per-view + combined summary image</span>
+          </span>
+        </button>
+
+        <button class="export-btn" id="export-strokes" aria-label="Export stroke data CSV">
+          <span class="export-icon">📄</span>
+          <span>
+            Export Stroke Data (CSV)
+            <span class="export-desc">All drawing points, normalised coordinates</span>
+          </span>
+        </button>
+
+        <button class="export-btn" id="export-bsa" aria-label="Export BSA scores CSV">
+          <span class="export-icon">📊</span>
+          <span>
+            Export BSA Scores (CSV)
+            <span class="export-desc">EASI region percentages &amp; weights</span>
+          </span>
+        </button>
+
+        <button class="export-btn export-all-btn" id="export-all"
+                aria-label="Export all files at once">
+          <span class="export-icon">📦</span>
+          <span>
+            Export All
+            <span class="export-desc">Downloads all 3 files</span>
+          </span>
+        </button>
+
+      </div>
+    </div>
+  </div>
+
+</div><!-- /app -->
+
+<!-- Scripts (order matters) -->
+<script src="silhouettes.js"></script>
+<script src="region-map.js"></script>
+<script src="canvas-manager.js"></script>
+<script src="export.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
